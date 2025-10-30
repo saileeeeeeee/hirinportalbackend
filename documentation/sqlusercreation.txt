@@ -1,0 +1,35 @@
+-- SQL Server login and database user creation with full database access
+DECLARE @LoginName NVARCHAR(128) = 'portaladminuser';
+DECLARE @Password NVARCHAR(128) = 'UBTI@2025acp';
+DECLARE @DatabaseName NVARCHAR(128) = 'ubtihiringportal';
+DECLARE @SQL NVARCHAR(MAX);  -- Make sure to declare this variable
+
+-- 1. Create the SQL Server login if it doesn't exist
+IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = @LoginName)
+BEGIN
+    EXEC('CREATE LOGIN [' + @LoginName + '] WITH PASSWORD = ''' + @Password + ''', CHECK_POLICY = ON;');
+    PRINT 'Login created successfully';
+END
+ELSE
+    PRINT 'Login already exists';
+
+-- 2. Create the database user if it doesn't exist
+SET @SQL = '
+USE [' + @DatabaseName + '];
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = ''' + @LoginName + ''')
+BEGIN
+    CREATE USER [' + @LoginName + '] FOR LOGIN [' + @LoginName + '];
+    PRINT ''Database user created successfully'';
+END
+ELSE
+    PRINT ''Database user already exists'';
+';
+EXEC (@SQL);
+
+-- 3. Grant full access to the database
+SET @SQL = '
+USE [' + @DatabaseName + '];
+ALTER ROLE db_owner ADD MEMBER [' + @LoginName + '];
+PRINT ''Full access granted successfully'';
+';
+EXEC (@SQL);
