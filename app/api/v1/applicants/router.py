@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, s
 from sqlalchemy.orm import Session
 from typing import List, Dict, Optional
 from app.db.connection import get_db
-from app.services.applicant_service import create_applicant, get_all_applicants
+from app.services.applicant_service import create_applicant, get_all_applicants,get_applicants_by_job
 from app.services.bulk_applicant_service import create_applicant_from_pdf
 from app.api.v1.applicants.schemas import (
     ApplicantCreate, BulkApplicantCreate, BulkUploadSummary, ApplicantResponse
@@ -163,3 +163,23 @@ async def bulk_upload_applicants(
         results=results,
         errors=[r["error"] for r in results if r["error"]]
     )
+
+
+
+
+
+
+@router.get("/applicants/job/{job_id}", response_model=List[dict])
+async def get_applicants_for_job(job_id: int, db: Session = Depends(get_db)):
+    """
+    Get applicants for a specific job_id.
+    URL: /api/v1/applicants/job/{job_id}
+    """
+    if job_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+
+    applicants = get_applicants_by_job(db, job_id)
+    if not applicants:
+        # consistent with get_applicants behavior: 404 if no rows found
+        raise HTTPException(status_code=404, detail=f"No applicants found for job_id {job_id}")
+    return applicants

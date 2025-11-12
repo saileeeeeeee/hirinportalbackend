@@ -187,3 +187,25 @@ CREATE TABLE confirmed_candidates (
     created_at DATETIME DEFAULT GETDATE(),
     updated_at DATETIME DEFAULT GETDATE()
 );
+
+
+
+--------------------------------------------------
+job Request table
+
+CREATE TABLE Job_Request (
+    JD_ID INT IDENTITY(1,1) PRIMARY KEY,
+    manager_id INT NOT NULL,
+    JobTitle NVARCHAR(100) NOT NULL,
+    JobDescription NVARCHAR(MAX) NOT NULL,
+    MinExperienceYears INT NOT NULL CHECK (MinExperienceYears >= 0),
+    MaxExperienceYears INT NULL,
+    KeySkills NVARCHAR(500) NULL,
+    AdditionalSkills NVARCHAR(500) NULL,
+    TotalVacancy INT NOT NULL CHECK (TotalVacancy > 0),
+    management_approval BIT NOT NULL DEFAULT 0,  -- 1 = YES, 0 = NO
+
+    -- Table-level CHECK constraint to compare columns
+    CONSTRAINT CHK_ExperienceRange 
+        CHECK (MaxExperienceYears IS NULL OR MaxExperienceYears >= MinExperienceYears)
+);

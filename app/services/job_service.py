@@ -1,51 +1,39 @@
+# app/services/job_service.py
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from app.api.v1.hr.schemas import JobCreate
-from datetime import datetime
+from app.api.v1.hr.schemas import JobCreate, JobRequestCreate, JobRequestResponse, JobRequestUpdate
 from fastapi import HTTPException
+from datetime import datetime
+from typing import Optional
 
-from sqlalchemy import text
-
-# app/services/job_service.py
+# ==============================
+#       JOB POSTING LOGIC
+# ==============================
 
 def get_active_jobs(db: Session):
     query = text("""
         SELECT 
-            job_id,
-            created_by,
-            title,
-            job_code,
-            department,
-            location,
-            employment_type,
-            experience_required,
-            salary_range,
-            jd,
-            key_skills,
-            additional_skills,
-            openings,
-            posted_date,
-            closing_date,
-            status,
-            approved_by,
-            approved_date
+            job_id, created_by, title, job_code, department, location,
+            employment_type, experience_required, salary_range, jd,
+            key_skills, additional_skills, openings, posted_date,
+            closing_date, status, approved_by, approved_date
         FROM jobs 
         WHERE status = 'open'
         ORDER BY posted_date DESC
     """)
     result = db.execute(query).mappings().fetchall()
-    return [dict(row) for row in result]  # ← Returns full dict
+    return [dict(row) for row in result]
 
 
 def create_job(db: Session, job: JobCreate):
-    # Check if approved_by exists in users table
     if job.approved_by:
-        query = text("SELECT emp_id FROM users WHERE emp_id = :emp_id")
-        user = db.execute(query, {"emp_id": job.approved_by}).fetchone()
-        if not user:
-            raise HTTPException(status_code=400, detail=f"User with emp_id {job.approved_by} not found.")
-    
-    # Insert job data into the database
+        user_check = db.execute(
+            text("SELECT emp_id FROM users WHERE emp_id = :emp_id"),
+            {"emp_id": job.approved_by}
+        ).fetchone()
+        if not user_check:
+            raise HTTPException(status_code=400, detail=f"Approver with emp_id {job.approved_by} not found.")
+
     insert_query = text("""
         INSERT INTO jobs (
             created_by, title, job_code, department, location, employment_type,
@@ -58,11 +46,9 @@ def create_job(db: Session, job: JobCreate):
         )
     """)
 
-    # Default posted_date if not provided
     posted_date = job.posted_date or datetime.now()
 
     try:
-        # Execute the INSERT query
         db.execute(insert_query, {
             "created_by": job.created_by,
             "title": job.title,
@@ -82,22 +68,13 @@ def create_job(db: Session, job: JobCreate):
             "approved_by": job.approved_by,
             "approved_date": job.approved_date
         })
-        db.commit()  # Commit the transaction after the insert
-
-        # Return a success message or status indicating job creation
+        db.commit()
         return {"message": "Job created successfully", "status": "success"}
-
     except Exception as e:
-        db.rollback()  # Rollback in case of error
-        # Log the error for debugging purposes
-        print(f"Error: {str(e)}")
+        db.rollback()
         raise HTTPException(status_code=500, detail=f"Error creating job: {str(e)}")
-    
 
 
-
-
-# app/services/job_service.py
 def get_job_by_id(db: Session, job_id: int):
     query = text("""
         SELECT 
@@ -114,5 +91,211 @@ def get_job_by_id(db: Session, job_id: int):
     return dict(result)
 
 
+# ==============================
+#       JOB REQUEST LOGIC
+# ==============================
+
+def _get_manager_id_by_name(db: Session, manager_name: str) -> int:
+    """
+    Search `users` table for a Manager by full_name or username.
+    Returns emp_id if found, else raises 404.
+    """
+    # Try exact match on full_name first
+    sql = text("""
+        SELECT emp_id FROM users 
+        WHERE role = 'Manager' 
+          AND (full_name = :name OR username = :name)
+          AND status = 'active'
+    """)
+    result = db.execute(sql, {"name": manager_name.strip()}).fetchone()
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Manager with name '{manager_name}' not found or not active."
+        )
+    # result may be RowProxy-like; return the emp_id column
+    try:
+        return result.emp_id
+    except Exception:
+        # fallback in case result is tuple/dict
+        return list(result)[0]
+
+def create_job_request(db: Session, payload: JobRequestCreate) -> JobRequestResponse:
+    """
+    Create Job_Request using manager_name → lookup → manager_id
+    Uses OUTPUT INSERTED.JD_ID for SQL Server so driver returns the new id.
+    """
+    # 1. Resolve manager_name → manager_id
+    try:
+        manager_id = _get_manager_id_by_name(db, payload.manager_name)
+    except HTTPException:
+        raise  # re-raise 404
+
+    insert_sql = text("""
+        INSERT INTO Job_Request (
+            manager_id, JobTitle, JobDescription,
+            MinExperienceYears, MaxExperienceYears,
+            KeySkills, AdditionalSkills,
+            TotalVacancy, management_approval
+        )
+        OUTPUT INSERTED.JD_ID
+        VALUES (
+            :manager_id, :JobTitle, :JobDescription,
+            :MinExperienceYears, :MaxExperienceYears,
+            :KeySkills, :AdditionalSkills,
+            :TotalVacancy, :management_approval
+        );
+    """)
+
+    params = {
+        "manager_id": manager_id,
+        "JobTitle": payload.JobTitle,
+        "JobDescription": payload.JobDescription,
+        "MinExperienceYears": payload.MinExperienceYears,
+        "MaxExperienceYears": payload.MaxExperienceYears,
+        "KeySkills": payload.KeySkills,
+        "AdditionalSkills": payload.AdditionalSkills,
+        "TotalVacancy": payload.TotalVacancy,
+        "management_approval": 1 if payload.management_approval else 0,
+    }
+
+    try:
+        # execute the insert which returns the inserted JD_ID via OUTPUT
+        result = db.execute(insert_sql, params)
+        # scalar() returns first column of first row (the JD_ID)
+        new_id_val = result.scalar()
+        db.commit()
+        if new_id_val is None:
+            raise HTTPException(status_code=500, detail="Failed to obtain inserted JD_ID.")
+        new_id = int(new_id_val)
+        return get_job_request_by_id(db, new_id)
+    except HTTPException:
+        # re-raise explicit HTTPException
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
+
+def get_job_request_by_id(db: Session, jd_id: int) -> JobRequestResponse:
+    sql = text("""
+        SELECT 
+            JD_ID, manager_id, JobTitle, JobDescription,
+            MinExperienceYears, MaxExperienceYears,
+            KeySkills, AdditionalSkills,
+            TotalVacancy, management_approval
+        FROM Job_Request
+        WHERE JD_ID = :jd_id
+    """)
+    row = db.execute(sql, {"jd_id": jd_id}).mappings().fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Job request not found")
+    row_dict = dict(row)
+    row_dict["management_approval"] = bool(row_dict["management_approval"])
+    return JobRequestResponse(**row_dict)
+
+
+def list_job_requests(db: Session, approved: Optional[bool] = None):
+    sql = "SELECT * FROM Job_Request"
+    params = {}
+    if approved is not None:
+        sql += " WHERE management_approval = :approved"
+        params["approved"] = 1 if approved else 0
+    sql += " ORDER BY JD_ID DESC"
+
+    rows = db.execute(text(sql), params).mappings().fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["management_approval"] = bool(d["management_approval"])
+        result.append(d)
+    return result
+
+
+def update_job_request_approval(db: Session, jd_id: int, approve: bool) -> JobRequestResponse:
+    """
+    Toggle/set management_approval for a job request and return updated row.
+    """
+    sql = text("""
+        UPDATE Job_Request
+        SET management_approval = :val
+        WHERE JD_ID = :jd_id
+    """)
+    res = db.execute(sql, {"val": 1 if approve else 0, "jd_id": jd_id})
+    if res.rowcount == 0:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="Job request not found")
+    db.commit()
+    return get_job_request_by_id(db, jd_id)
+
+
+def delete_job_request(db: Session, jd_id: int) -> dict:
+    sql = text("DELETE FROM Job_Request WHERE JD_ID = :jd_id")
+    res = db.execute(sql, {"jd_id": jd_id})
+    if res.rowcount == 0:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="Job request not found")
+    db.commit()
+    return {"message": "Job request deleted", "JD_ID": jd_id}
+
+
+def update_job_request(db: Session, jd_id: int, payload: JobRequestUpdate) -> JobRequestResponse:
+    """
+    Partial update fields provided in payload. If manager_name provided, resolve to manager_id.
+    """
+    # Ensure JD exists
+    existing = db.execute(text("SELECT JD_ID FROM Job_Request WHERE JD_ID = :jd_id"), {"jd_id": jd_id}).fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Job request not found")
+
+    updates = []
+    params = {"jd_id": jd_id}
+
+    if payload.manager_name is not None:
+        manager_id = _get_manager_id_by_name(db, payload.manager_name)
+        updates.append("manager_id = :manager_id")
+        params["manager_id"] = manager_id
+
+    if payload.JobTitle is not None:
+        updates.append("JobTitle = :JobTitle")
+        params["JobTitle"] = payload.JobTitle
+    if payload.JobDescription is not None:
+        updates.append("JobDescription = :JobDescription")
+        params["JobDescription"] = payload.JobDescription
+    if payload.MinExperienceYears is not None:
+        updates.append("MinExperienceYears = :MinExperienceYears")
+        params["MinExperienceYears"] = payload.MinExperienceYears
+    if payload.MaxExperienceYears is not None:
+        updates.append("MaxExperienceYears = :MaxExperienceYears")
+        params["MaxExperienceYears"] = payload.MaxExperienceYears
+    if payload.KeySkills is not None:
+        updates.append("KeySkills = :KeySkills")
+        params["KeySkills"] = payload.KeySkills
+    if payload.AdditionalSkills is not None:
+        updates.append("AdditionalSkills = :AdditionalSkills")
+        params["AdditionalSkills"] = payload.AdditionalSkills
+    if payload.TotalVacancy is not None:
+        updates.append("TotalVacancy = :TotalVacancy")
+        params["TotalVacancy"] = payload.TotalVacancy
+    if payload.management_approval is not None:
+        updates.append("management_approval = :management_approval")
+        params["management_approval"] = 1 if payload.management_approval else 0
+
+    if not updates:
+        return get_job_request_by_id(db, jd_id)  # nothing to update
+
+    set_clause = ", ".join(updates)
+    sql = text(f"UPDATE Job_Request SET {set_clause} WHERE JD_ID = :jd_id")
+
+    try:
+        res = db.execute(sql, params)
+        if res.rowcount == 0:
+            db.rollback()
+            raise HTTPException(status_code=404, detail="Job request not found")
+        db.commit()
+        return get_job_request_by_id(db, jd_id)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update job request: {str(e)}")

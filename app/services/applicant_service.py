@@ -198,6 +198,13 @@ def get_normal_keywords(job_id: int, db: Session) -> set:
 
 
 
+
+
+
+
+
+
+
 def get_all_applicants(db: Session) -> List[dict]:
     """
     Fetch ALL applications + applicant data (even if applicant missing)
@@ -293,4 +300,100 @@ def get_all_applicants(db: Session) -> List[dict]:
 
 
 
+
+
+def get_applicants_by_job(db: Session, job_id: int) -> List[dict]:
+    """
+    Fetch applications + applicant data for a specific job_id.
+    Returns list (possibly empty).
+    """
+    if job_id is None or job_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+
+    try:
+        query = text("""
+            SELECT 
+                app.application_id,
+                app.job_id,
+                app.applicant_id,
+                app.applied_date,
+                app.source,
+                app.skills_matching_score,
+                app.jd_matching_score,
+                app.resume_overall_score,
+                app.application_status,
+                app.assigned_hr,
+                app.assigned_manager,
+                app.comments,
+                app.updated_at AS app_updated_at,
+                
+                a.applicant_id AS a_applicant_id,
+                a.first_name,
+                a.last_name,
+                a.email,
+                a.phone,
+                a.linkedin_url,
+                a.resume_url,
+                a.experience_years,
+                a.education,
+                a.current_company,
+                a.current_role,
+                a.expected_ctc,
+                a.notice_period_days,
+                a.skills,
+                a.location,
+                a.created_at AS a_created_at,
+                a.updated_at AS a_updated_at
+            FROM applications app
+            LEFT JOIN applicants a ON app.applicant_id = a.applicant_id
+            WHERE app.job_id = :job_id
+            ORDER BY app.applied_date DESC
+        """)
+
+        result = db.execute(query, {"job_id": job_id}).mappings().fetchall()
+        if not result:
+            return []
+
+        applicants: List[dict] = []
+        for row in result:
+            applicants.append({
+                # Application
+                "application_id": row.get("application_id"),
+                "job_id": row.get("job_id"),
+                "applicant_id": row.get("applicant_id"),
+                "applied_date": row.get("applied_date"),
+                "source": row.get("source"),
+                "skills_matching_score": row.get("skills_matching_score"),
+                "jd_matching_score": row.get("jd_matching_score"),
+                "resume_overall_score": row.get("resume_overall_score"),
+                "application_status": row.get("application_status") or "pending",
+                "assigned_hr": row.get("assigned_hr"),
+                "assigned_manager": row.get("assigned_manager"),
+                "comments": row.get("comments"),
+                "updated_at": row.get("app_updated_at"),
+
+                # Applicant (may be null)
+                "first_name": row.get("first_name") or "Unknown",
+                "last_name": row.get("last_name") or "Applicant",
+                "email": row.get("email") or "N/A",
+                "phone": row.get("phone"),
+                "linkedin_url": row.get("linkedin_url"),
+                "resume_url": row.get("resume_url"),
+                "experience_years": float(row.get("experience_years") or 0),
+                "education": row.get("education"),
+                "current_company": row.get("current_company"),
+                "current_role": row.get("current_role"),
+                "expected_ctc": float(row.get("expected_ctc") or 0.0),
+                "notice_period_days": int(row.get("notice_period_days") or 0),
+                "skills": row.get("skills"),
+                "location": row.get("location"),
+                "created_at": row.get("a_created_at"),
+                "applicant_updated_at": row.get("a_updated_at"),
+            })
+
+        return applicants
+
+    except Exception as e:
+        logger.exception(f"Database error in get_applicants_by_job (job_id={job_id}): {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch applicants for job.")
     
