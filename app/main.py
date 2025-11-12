@@ -1,54 +1,56 @@
+# app/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.logging import setup_logging
 from app.config import settings
 
-# Import API v1 routers
-#from app.api.v1 import user, item
-from app.api.v1.hr import job as hr_job
-from app.api.v1.applicants import router as applicants  # Applicants router
-
-# from app.api.v2 import ...  # Future API versions
+# === CORRECT IMPORTS ===
+from app.api.v1.users.router import router as users_router
+from app.api.v1.hr.job import router as hr_job_router          # ← Fixed
+from app.api.v1.applicants.router import router as applicants_router  # ← Fixed
 
 def create_app() -> FastAPI:
-    # Initialize logging
     setup_logging()
 
     app = FastAPI(
         title=settings.PROJECT_NAME,
         version="1.0.0",
-        description="FastAPI application structured for scalability",
+        description="UBTI Hiring Portal - Scalable FastAPI Backend",
     )
 
-    # CORS Middleware
+    # === CORS ===
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.BACKEND_CORS_ORIGINS,
-     
+        allow_origins=settings.get_cors_origins(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # Include API v1 routers
-    # app.include_router(user.router, prefix="/api/v1/users", tags=["Users"])
-    # app.include_router(item.router, prefix="/api/v1/items", tags=["Items"])
-    app.include_router(hr_job.router, prefix="/api/v1/hr/jobs", tags=["HR Jobs"])
-    app.include_router(applicants.router, prefix="/api/v1/applicants", tags=["Applicants"])  # NEW
+    # === ROUTERS ===
+    app.include_router(users_router,      prefix="/api/v1/users",      tags=["Users"])
+    app.include_router(hr_job_router,    prefix="/api/v1/hr/jobs",   tags=["HR Jobs"])
+    app.include_router(applicants_router,prefix="/api/v1/applicants",tags=["Applicants"])
 
-    # Startup and shutdown events
+    # === TEST ROUTE ===
+    @app.get("/test-cors")
+    def test_cors():
+        return {
+            "message": "CORS is working!",
+            "allowed_origins": settings.get_cors_origins(),
+        }
+
+    # === EVENTS ===
     @app.on_event("startup")
     async def startup_event():
-        print("Starting up...")
-        # e.g., connect to DB, init caches, etc.
+        print("Starting up UBTI Hiring Portal...")
+        print(f"Project: {settings.PROJECT_NAME}")
+        print(f"CORS Allowed Origins: {settings.get_cors_origins()}")
 
     @app.on_event("shutdown")
     async def shutdown_event():
         print("Shutting down...")
-        # e.g., close DB connections
 
     return app
 
 app = create_app()
-
-

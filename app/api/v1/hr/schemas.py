@@ -20,8 +20,35 @@ class JobCreate(BaseModel):
     openings: Optional[int] = 1
     posted_date: Optional[datetime] = None
     closing_date: Optional[datetime] = None
-    status: Optional[str] = Field(
-        'open', pattern="^(open|on_hold|closed)$"
-    )
+    status: Optional[str] = Field('open', pattern="^(open|on_hold|closed)$")
     approved_by: Optional[int] = None
     approved_date: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+# app/api/v1/hr/schemas.py
+
+class JobResponse(BaseModel):
+    job_id: int
+    created_by: int
+    title: str
+    job_code: Optional[str] = None
+    department: Optional[str] = None
+    location: Optional[str] = None
+    employment_type: Optional[str] = None
+    experience_required: Optional[str] = None
+    salary_range: Optional[str] = None
+    jd: Optional[str] = None
+    key_skills: Optional[str] = None
+    additional_skills: Optional[str] = None
+    openings: Optional[int] = 1
+    posted_date: Optional[datetime] = None
+    closing_date: Optional[datetime] = None
+    status: Optional[str] = "open"
+    approved_by: Optional[int] = None
+    approved_date: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True

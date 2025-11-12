@@ -5,3 +5,22 @@ pydantic
 python-multipart  # required for file uploads
 pyodbc            # for SQL Server
 pydantic[email]
+pypdf
+sentence-transformers
+nltk
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

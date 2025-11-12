@@ -1,11 +1,4 @@
--- ============================================
--- HR Recruitment System Database Schema
--- Compatible with Microsoft SQL Server
--- ============================================
-
--- Drop existing tables in reverse dependency order (optional)
--- Uncomment if you need to refresh the schema
-/*
+-- Drop all the tables in reverse order to avoid foreign key issues
 DROP TABLE IF EXISTS interview_performance;
 DROP TABLE IF EXISTS interview_rounds_attended;
 DROP TABLE IF EXISTS interview_schedule;
@@ -15,13 +8,12 @@ DROP TABLE IF EXISTS jobs;
 DROP TABLE IF EXISTS interviewers;
 DROP TABLE IF EXISTS applicants;
 DROP TABLE IF EXISTS users;
-*/
 
 -- ============================================
--- USERS
+-- USERS (modified emp_id without IDENTITY)
 -- ============================================
 CREATE TABLE users (
-    user_id INT IDENTITY(1,1) PRIMARY KEY,
+    emp_id INT PRIMARY KEY,  -- emp_id without IDENTITY
     username VARCHAR(50) NOT NULL UNIQUE,
     password_hash VARCHAR(255) NOT NULL,
     email VARCHAR(100) NOT NULL UNIQUE,
@@ -37,33 +29,33 @@ CREATE TABLE users (
 
 -- ============================================
 -- APPLICANTS
--- ============================================
-CREATE TABLE applicants (
-    applicant_id INT IDENTITY(1,1) PRIMARY KEY,
-    first_name VARCHAR(50),
-    last_name VARCHAR(50),
-    email VARCHAR(100),
-    phone VARCHAR(20),
-    linkedin_url VARCHAR(255),
-    resume_url VARCHAR(255),
-    experience_years DECIMAL(4,1),
-    education VARCHAR(255),
-    current_company VARCHAR(255),
-    current_role VARCHAR(100),
-    expected_ctc DECIMAL(10,2),
-    notice_period_days INT,
-    skills TEXT,
-    location VARCHAR(100),
-    created_at DATETIME DEFAULT GETDATE(),
-    updated_at DATETIME DEFAULT GETDATE()
-);
+    -- ============================================
+    CREATE TABLE applicants (
+        applicant_id INT IDENTITY(1,1) PRIMARY KEY,
+        first_name VARCHAR(50),
+        last_name VARCHAR(50),
+        email VARCHAR(100),
+        phone VARCHAR(20),
+        linkedin_url VARCHAR(255),
+        resume_url VARCHAR(255),
+        experience_years DECIMAL(4,1),
+        education VARCHAR(255),
+        current_company VARCHAR(255),
+        current_role VARCHAR(100),
+        expected_ctc DECIMAL(10,2),
+        notice_period_days INT,
+        skills TEXT,
+        location VARCHAR(100),
+        created_at DATETIME DEFAULT GETDATE(),
+        updated_at DATETIME DEFAULT GETDATE()
+    );
 
 -- ============================================
 -- JOBS
 -- ============================================
 CREATE TABLE jobs (
     job_id INT IDENTITY(1,1) PRIMARY KEY,
-    created_by INT FOREIGN KEY REFERENCES users(user_id),
+    created_by INT FOREIGN KEY REFERENCES users(emp_id),  -- Updated reference
     title VARCHAR(150),
     job_code VARCHAR(50),
     department VARCHAR(100),
@@ -78,7 +70,7 @@ CREATE TABLE jobs (
     posted_date DATETIME,
     closing_date DATETIME,
     status VARCHAR(10) CHECK (status IN ('open','on_hold','closed')),
-    approved_by INT NULL FOREIGN KEY REFERENCES users(user_id),
+    approved_by INT NULL FOREIGN KEY REFERENCES users(emp_id),  -- Updated reference
     approved_date DATETIME NULL
 );
 
@@ -96,8 +88,8 @@ CREATE TABLE applications (
     resume_overall_score DECIMAL(5,2),
     application_status VARCHAR(30) CHECK (application_status IN 
         ('applied','shortlisted','under_review','interview_scheduled','offered','rejected','hired')),
-    assigned_hr INT NULL FOREIGN KEY REFERENCES users(user_id),
-    assigned_manager INT NULL FOREIGN KEY REFERENCES users(user_id),
+    assigned_hr INT NULL FOREIGN KEY REFERENCES users(emp_id),  -- Updated reference
+    assigned_manager INT NULL FOREIGN KEY REFERENCES users(emp_id),  -- Updated reference
     comments TEXT,
     updated_at DATETIME DEFAULT GETDATE()
 );
@@ -113,12 +105,12 @@ CREATE TABLE interview_schedule (
     scheduled_date DATETIME,
     duration_minutes INT,
     interviewer_ids TEXT,
-    manager_id INT NULL FOREIGN KEY REFERENCES users(user_id),
+    manager_id INT NULL FOREIGN KEY REFERENCES users(emp_id),  -- Updated reference
     meeting_link VARCHAR(255),
     location VARCHAR(255),
     schedule_status VARCHAR(20) CHECK (schedule_status IN ('scheduled','completed','cancelled','rescheduled')),
     remarks TEXT,
-    created_by INT FOREIGN KEY REFERENCES users(user_id),
+    created_by INT FOREIGN KEY REFERENCES users(emp_id),  -- Updated reference
     created_at DATETIME DEFAULT GETDATE(),
     updated_at DATETIME DEFAULT GETDATE()
 );
@@ -133,7 +125,7 @@ CREATE TABLE interview_rounds_attended (
     attendance_status VARCHAR(20) CHECK (attendance_status IN ('attended','no_show','rescheduled')),
     result VARCHAR(10) CHECK (result IN ('pending','pass','fail')),
     feedback_summary TEXT,
-    recorded_by INT FOREIGN KEY REFERENCES users(user_id),
+    recorded_by INT FOREIGN KEY REFERENCES users(emp_id),  -- Updated reference
     updated_at DATETIME DEFAULT GETDATE()
 );
 
@@ -143,7 +135,7 @@ CREATE TABLE interview_rounds_attended (
 CREATE TABLE interview_performance (
     performance_id INT IDENTITY(1,1) PRIMARY KEY,
     round_attended_id INT FOREIGN KEY REFERENCES interview_rounds_attended(round_attended_id),
-    interviewer_id INT FOREIGN KEY REFERENCES users(user_id),
+    interviewer_id INT FOREIGN KEY REFERENCES users(emp_id),  -- Updated reference
     technical_score DECIMAL(5,2),
     communication_score DECIMAL(5,2),
     problem_solving_score DECIMAL(5,2),
@@ -163,7 +155,7 @@ CREATE TABLE interview_performance (
 -- ============================================
 CREATE TABLE interviewers (
     interviewer_id INT IDENTITY(1,1) PRIMARY KEY,
-    user_id INT FOREIGN KEY REFERENCES users(user_id),
+    user_id INT FOREIGN KEY REFERENCES users(emp_id),  -- Updated reference
     name VARCHAR(100),
     email VARCHAR(100),
     department VARCHAR(100),
@@ -188,7 +180,7 @@ CREATE TABLE confirmed_candidates (
     package_offered DECIMAL(10,2),
     designation_offered VARCHAR(100),
     department VARCHAR(100),
-    reporting_manager_id INT FOREIGN KEY REFERENCES users(user_id),
+    reporting_manager_id INT FOREIGN KEY REFERENCES users(emp_id),  -- Updated reference
     background_check_status VARCHAR(20) CHECK (background_check_status IN ('pending','in_progress','completed','failed')),
     preboarding_tasks_completed BIT DEFAULT 0,
     comments TEXT,
