@@ -1,135 +1,156 @@
-# app/services/bulk_applicant_service.py
 import os
 import re
 import shutil
 import logging
 import tempfile
 from datetime import datetime
-from typing import Optional, Dict, Any
-
+from typing import Optional, Dict, Any, Set
 import PyPDF2
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from fastapi import UploadFile, HTTPException
 
-# === Import helpers from applicant_service ===
-from .applicant_service import (
-    save_resume,
-    trigger_evaluate_resume_match,
-    get_jd,
-    get_high_priority_keywords,
-    get_normal_keywords,
-)
+logging.basicConfig(level=logging.INFO)
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
-)
+UPLOAD_DIR = "uploads/resumes"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
-def extract_text_from_pdf(file_path: str) -> str:
+def _save_resume_from_temp(tmp_file_path: str, applicant_id: int, original_filename: str) -> str:
+    """
+    Move/rename the temp file into uploads/resumes with a stable name.
+    Avoid re-reading UploadFile.file (which may be at EOF).
+    """
+    filename = f"{applicant_id}_{original_filename}"
+    dest = os.path.join(UPLOAD_DIR, filename)
+    # Use shutil.move (rename/move)
+    shutil.move(tmp_file_path, dest)
+    logging.info(f"Resume moved to: {dest}")
+    return dest
+
+
+def _extract_text_from_pdf(file_path: str) -> str:
     try:
         with open(file_path, "rb") as f:
             reader = PyPDF2.PdfReader(f)
-            return "\n".join(page.extract_text() or "" for page in reader.pages)
+            texts = []
+            for page in reader.pages:
+                try:
+                    t = page.extract_text()
+                    if t:
+                        texts.append(t)
+                except Exception:
+                    # page-level extraction failure shouldn't abort everything
+                    continue
+            return "\n".join(texts)
     except Exception as e:
-        logging.error(f"PDF read error: {e}")
+        logging.error(f"PDF error extracting text from {file_path}: {e}")
         return ""
 
 
-def parse_resume_pdf(text: str) -> Dict[str, Any]:
+def _parse_resume_pdf(text: str) -> Dict[str, Any]:
+    """
+    Best-effort resume parsing. Returns dict with keys used downstream.
+    """
     text = text.replace("\0", " ").strip()
-    data: Dict[str, Any] = {
+    data = {
         "first_name": "", "last_name": "", "email": "", "phone": "", "linkedin_url": "",
-        "experience_years": 0.0, "education": "", "current_company": "", "current_role": "",
-        "skills": ""
+        "experience_years": 0.0, "education": "", "current_company": "", "current_role": "", "skills": ""
     }
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-    lines = [line.strip() for line in text.split("\n") if line.strip()]
-
-    # Name
-    for line in lines[:5]:
-        if re.match(r"^[A-Za-z\s\.\-]+$", line) and len(line.split()) <= 4:
-            name_parts = re.findall(r"[A-Za-z]+", line)
-            if len(name_parts) >= 2:
-                data["first_name"] = name_parts[0]
-                data["last_name"] = " ".join(name_parts[1:3])
+    # Try to parse name from top lines
+    for line in lines[:6]:
+        # allow letters, dots, hyphens, spaces
+        if re.match(r"^[A-Za-z\s\.\-]+$", line) and 1 <= len(line.split()) <= 4:
+            parts = re.findall(r"[A-Za-z]+", line)
+            if len(parts) >= 2:
+                data["first_name"] = parts[0].capitalize()
+                data["last_name"] = " ".join(parts[1:3]).capitalize()
                 break
-            elif name_parts:
-                data["first_name"] = name_parts[0]
+            elif parts:
+                data["first_name"] = parts[0].capitalize()
                 break
 
     # Email
-    email_match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
-    if email_match:
-        data["email"] = email_match.group(0).lower()
+    email = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+    if email:
+        data["email"] = email.group(0).lower()
 
-    # Phone
-    phone_match = re.search(r"(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", text)
-    if phone_match:
-        data["phone"] = re.sub(r"\D", "", phone_match.group(0))[-10:]
+    # Phone (last 10 digits normalized)
+    phone = re.search(r"(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}", text)
+    if phone:
+        digits = re.sub(r"\D", "", phone.group(0))
+        if len(digits) >= 10:
+            data["phone"] = digits[-10:]
 
     # LinkedIn
-    linkedin_match = re.search(r"linkedin\.com/in/[A-Za-z0-9\-_%]+", text, re.I)
-    if linkedin_match:
-        data["linkedin_url"] = "https://" + linkedin_match.group(0)
+    linkedin = re.search(r"(linkedin\.com\/in\/[A-Za-z0-9\-_%.]+)", text, re.I)
+    if linkedin:
+        url = linkedin.group(1)
+        data["linkedin_url"] = url if url.startswith("http") else f"https://{url}"
 
-    # Experience
-    exp_section = re.search(r"(Experience|Work History|Professional Experience)[\s\S]*?(?=(\n[A-Z]|$))", text, re.I)
+    # Experience years: naive scan of Experience/Work History block
+    exp_block = re.search(r"(Experience|Work History)[\s\S]*?(?=(\n[A-Z][a-z]|$))", text, re.I)
     total_years = 0.0
-    current_job = None
-
-    if exp_section:
-        exp_text = exp_section.group(0)
-        jobs = re.split(r"\n\s*\n", exp_text)
-        job_entries = []
-
+    if exp_block:
+        jobs = re.split(r"\n\s*\n", exp_block.group(0))
         for job in jobs:
-            if not job.strip(): continue
-            company_match = re.search(r"at\s+([A-Za-z0-9\s&.,]+?)(?:\n|\||$)", job, re.I)
-            role_match = re.search(r"^([A-Za-z\s&.,]+?)(?:\n|at|\|)", job, re.I)
-            date_match = re.findall(r"(\d{4})\s*[-–to]+\s*(\d{4}|Present|Current)", job, re.I)
-
-            company = company_match.group(1).strip() if company_match else ""
-            role = role_match.group(1).strip() if role_match else ""
-
-            years = 0.0
-            if date_match:
-                start, end = date_match[0]
+            # look for ranges like 2018 - 2021, 2016–Present, Jan 2015 - Dec 2018 etc.
+            dates = re.findall(r"(\d{4})\s*[-–to]+\s*(\d{4}|Present|Current)", job, re.I)
+            if dates:
+                s, e = dates[0]
                 try:
-                    start_year = int(start)
-                    end_year = datetime.now().year if end.lower() in ["present", "current"] else int(end)
-                    years = max(0, end_year - start_year)
-                except:
-                    years = 0
-            total_years += years
-            job_entries.append({"company": company, "role": role, "years": years})
-
-        if job_entries:
-            current_job = job_entries[0]
-            data["current_company"] = current_job["company"]
-            data["current_role"] = current_job["role"]
-
+                    start_year = int(s)
+                    end_year = datetime.now().year if str(e).lower() in ("present", "current") else int(e)
+                    if end_year >= start_year:
+                        total_years += (end_year - start_year)
+                except Exception:
+                    continue
     data["experience_years"] = round(total_years, 1)
 
-    # Skills
-    skills_section = re.search(r"Skills?[\s:]+([^.\n}]+)", text, re.I)
-    if skills_section:
-        raw_skills = skills_section.group(1)
-        skills = [s.strip() for s in raw_skills.replace("•", ",").split(",") if s.strip()]
-        data["skills"] = ", ".join(skills[:20])
+    # Skills block (first line after "Skills")
+    skills = re.search(r"(Skills|Technical Skills|Skillset)[:\s]*([\s\S]{0,400}?)(?=(\n[A-Z][a-z]|$))", text, re.I)
+    if skills:
+        raw = skills.group(2)
+        # replace bullets and newlines with commas then split
+        cleaned = raw.replace("•", ",").replace("\n", ",")
+        data["skills"] = ", ".join([s.strip() for s in cleaned.split(",") if s.strip()][:30])
 
     # Education
-    edu_section = re.search(r"(Education|Academic|Qualification)[\s\S]*?(?=(\n[A-Z]|$))", text, re.I)
-    if edu_section:
-        edu_text = edu_section.group(0)
-        degree_match = re.search(r"(B\.Tech|M\.Tech|BSc|MSc|BE|ME|B\.E\.|M\.E\.|Bachelor|Master|PhD)", edu_text, re.I)
-        if degree_match:
-            data["education"] = degree_match.group(0)
+    edu = re.search(r"(Education|Academic Qualifications)[\s\S]*?(?=(\n[A-Z]|$))", text, re.I)
+    if edu:
+        deg = re.search(r"(B\.?Tech|M\.?Tech|BSc|MSc|BE|ME|B\.?E\.?|M\.?E\.?|Bachelor|Master|Ph\.?D)", edu.group(0), re.I)
+        if deg:
+            data["education"] = deg.group(0)
 
     return data
 
+
+def _get_jd(job_id: int, db: Session) -> str:
+    res = db.execute(text("SELECT jd FROM jobs WHERE job_id = :job_id"), {"job_id": job_id}).fetchone()
+    return res[0] if res else ""
+
+
+def _get_high_priority_keywords(job_id: int, db: Session) -> Set[str]:
+    rows = db.execute(text("SELECT key_skills FROM jobs WHERE job_id = :job_id"), {"job_id": job_id}).fetchall()
+    return {r[0] for r in rows if r[0]}
+
+
+def _get_normal_keywords(job_id: int, db: Session) -> Set[str]:
+    rows = db.execute(text("SELECT additional_skills FROM jobs WHERE job_id = :job_id"), {"job_id": job_id}).fetchall()
+    return {r[0] for r in rows if r[0]}
+
+
+def _trigger_evaluate_resume_match(**kwargs):
+    # imported lazily, keep original behavior
+    from .aishortlist import evaluate_resume_match
+    try:
+        return evaluate_resume_match(**kwargs)
+    except Exception as e:
+        logging.error(f"AI evaluation failed: {e}")
+        # bubble up a HTTPException so callers can produce a failure status code/message
+        raise HTTPException(status_code=500, detail=f"AI eval failed: {e}")
 
 def create_applicant_from_pdf(
     db: Session,
@@ -139,38 +160,34 @@ def create_applicant_from_pdf(
     expected_ctc: Optional[float] = None,
     notice_period_days: Optional[int] = None,
     application_status: str = "pending",
-    assigned_hr: Optional[str] = None,
-    assigned_manager: Optional[str] = None,
+    assigned_hr: Optional[int] = None,
+    assigned_manager: Optional[int] = None,
     comments: Optional[str] = None,
 ) -> Dict[str, Any]:
-    if not pdf_file.filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "Only PDF files are allowed")
+    if not pdf_file.filename or not pdf_file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files allowed")
 
     tmp_path = None
     final_path = None
     try:
-        # 1. Save to temp
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             shutil.copyfileobj(pdf_file.file, tmp)
             tmp_path = tmp.name
 
-        # 2. Extract text
-        raw_text = extract_text_from_pdf(tmp_path)
-        if not raw_text.strip():
-            raise HTTPException(400, "Empty PDF content")
+        # <-- renamed local variable to avoid shadowing sqlalchemy.text
+        extracted_text = _extract_text_from_pdf(tmp_path)
+        if not extracted_text.strip():
+            raise HTTPException(status_code=400, detail="Empty PDF or text extraction failed")
 
-        # 3. Parse resume
-        parsed = parse_resume_pdf(raw_text)
+        parsed = _parse_resume_pdf(extracted_text)
         if not parsed["email"]:
-            raise HTTPException(400, "Email not found in resume")
+            raise HTTPException(status_code=400, detail="Email not found")
         if not parsed["first_name"]:
-            raise HTTPException(400, "Name not found in resume")
+            raise HTTPException(status_code=400, detail="Name not found")
 
         now = datetime.now()
 
-        # === START TRANSACTION ===
         with db.begin():
-            # 4. INSERT applicant with OUTPUT
             applicant_data = {
                 "first_name": parsed["first_name"],
                 "last_name": parsed["last_name"] or "Applicant",
@@ -204,34 +221,18 @@ def create_applicant_from_pdf(
                     :resume_url, :updated_at
                 )
             """)
-
             result = db.execute(insert_sql, applicant_data)
             applicant_id = result.scalar()
             if not applicant_id:
-                raise HTTPException(500, "Failed to insert applicant - no ID returned")
+                raise HTTPException(status_code=500, detail="Failed to create applicant (no id returned)")
 
-            # 5. SAVE RESUME
-            final_path = save_resume(pdf_file, applicant_id=applicant_id)
-            logging.info(f"Resume saved at: {final_path}")
-
-            # 6. UPDATE resume_url
+            final_path = _save_resume_from_temp(tmp_path, applicant_id, pdf_file.filename)
             db.execute(
                 text("UPDATE applicants SET resume_url = :url WHERE applicant_id = :id"),
                 {"url": final_path, "id": applicant_id}
             )
 
-            # 7. INSERT application
-            app_params = {
-                "applicant_id": applicant_id,
-                "job_id": job_id,
-                "application_status": application_status,
-                "source": source,
-                "assigned_hr": assigned_hr or "Unassigned",
-                "assigned_manager": assigned_manager or "Unassigned",
-                "comments": comments,
-                "updated_at": now
-            }
-            db.execute(text("""
+            app_sql = text("""
                 INSERT INTO applications (
                     applicant_id, job_id, application_status, source,
                     assigned_hr, assigned_manager, comments, updated_at
@@ -239,14 +240,23 @@ def create_applicant_from_pdf(
                     :applicant_id, :job_id, :application_status, :source,
                     :assigned_hr, :assigned_manager, :comments, :updated_at
                 )
-            """), app_params)
+            """)
+            db.execute(app_sql, {
+                "applicant_id": applicant_id,
+                "job_id": job_id,
+                "application_status": application_status,
+                "source": source,
+                "assigned_hr": assigned_hr,
+                "assigned_manager": assigned_manager,
+                "comments": comments,
+                "updated_at": now
+            })
 
-            # 8. EVALUATE
-            eval_result = trigger_evaluate_resume_match(
+            eval_result = _trigger_evaluate_resume_match(
                 resume_pdf_path=final_path,
-                jd_text=get_jd(job_id, db),
-                high_priority_keywords=get_high_priority_keywords(job_id, db),
-                normal_keywords=get_normal_keywords(job_id, db),
+                jd_text=_get_jd(job_id, db),
+                high_priority_keywords=_get_high_priority_keywords(job_id, db),
+                normal_keywords=_get_normal_keywords(job_id, db),
                 job_id=job_id,
                 applicant_id=applicant_id,
                 source=source,
@@ -269,23 +279,22 @@ def create_applicant_from_pdf(
             "parsed": parsed
         }
 
+    except HTTPException:
+        logging.exception("HTTPException while creating applicant from PDF")
+        if final_path and os.path.exists(final_path):
+            try: os.unlink(final_path)
+            except: pass
+        raise
     except Exception as e:
-        logging.error(f"Single upload failed: {e}")
-        try:
-            db.rollback()
-        except:
-            pass
-        raise HTTPException(500, f"Failed to process resume: {str(e)}")
+        logging.exception(f"Upload failed: {e}")
+        if final_path and os.path.exists(final_path):
+            try: os.unlink(final_path)
+            except: pass
+        if tmp_path and os.path.exists(tmp_path):
+            try: os.unlink(tmp_path)
+            except: pass
+        raise HTTPException(status_code=500, detail=f"Failed: {e}")
     finally:
         if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
-
-
-
-
-
-
-
+            try: os.unlink(tmp_path)
+            except: pass

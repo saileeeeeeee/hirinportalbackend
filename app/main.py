@@ -4,21 +4,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.logging import setup_logging
 from app.config import settings
 
-# === CORRECT IMPORTS ===
+# === IMPORT ROUTERS ===
 from app.api.v1.users.router import router as users_router
-from app.api.v1.hr.job import router as hr_job_router          # ← Fixed
-from app.api.v1.applicants.router import router as applicants_router  # ← Fixed
+from app.api.v1.hr.job import router as hr_job_router
+from app.api.v1.applicants.router import router as applicants_router
+
 
 def create_app() -> FastAPI:
     setup_logging()
-
     app = FastAPI(
         title=settings.PROJECT_NAME,
         version="1.0.0",
         description="UBTI Hiring Portal - Scalable FastAPI Backend",
     )
 
-    # === CORS ===
+    # CORS
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.get_cors_origins(),
@@ -27,12 +27,12 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # === ROUTERS ===
-    app.include_router(users_router,      prefix="/api/v1/users",      tags=["Users"])
-    app.include_router(hr_job_router,    prefix="/api/v1/hr/jobs",   tags=["HR Jobs"])
-    app.include_router(applicants_router,prefix="/api/v1/applicants",tags=["Applicants"])
+    # Routers
+    app.include_router(users_router, prefix="/api/v1/users", tags=["Users"])
+    app.include_router(hr_job_router, prefix="/api/v1/hr/jobs", tags=["HR Jobs"])
+    app.include_router(applicants_router, prefix="/api/v1/applicants", tags=["Applicants"])
 
-    # === TEST ROUTE ===
+    # Test route
     @app.get("/test-cors")
     def test_cors():
         return {
@@ -40,7 +40,7 @@ def create_app() -> FastAPI:
             "allowed_origins": settings.get_cors_origins(),
         }
 
-    # === EVENTS ===
+    # Events
     @app.on_event("startup")
     async def startup_event():
         print("Starting up UBTI Hiring Portal...")
@@ -53,4 +53,8 @@ def create_app() -> FastAPI:
 
     return app
 
+
+# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+# CRITICAL: This must be at module level!
 app = create_app()
+# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
