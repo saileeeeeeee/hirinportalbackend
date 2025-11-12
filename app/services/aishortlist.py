@@ -12,7 +12,7 @@ from app.config import settings
 from app.db.connection import get_db
 
 # Download stopwords if not already present
-#nltk.download('stopwords')
+nltk.download('stopwords')
 
 # Load the embedding model and stopwords
 MODEL = SentenceTransformer('all-MiniLM-L6-v2')
