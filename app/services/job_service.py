@@ -4,13 +4,13 @@ from sqlalchemy import text
 from app.api.v1.hr.schemas import JobCreate, JobRequestCreate, JobRequestResponse, JobRequestUpdate
 from fastapi import HTTPException
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 # ==============================
 #       JOB POSTING LOGIC
 # ==============================
 
-def get_active_jobs(db: Session):
+def get_active_jobs(db: Session) -> List[Dict[str, Any]]:
     query = text("""
         SELECT 
             job_id, created_by, title, job_code, department, location,
@@ -25,7 +25,7 @@ def get_active_jobs(db: Session):
     return [dict(row) for row in result]
 
 
-def create_job(db: Session, job: JobCreate):
+def create_job(db: Session, job: JobCreate) -> Dict[str, Any]:
     if job.approved_by:
         user_check = db.execute(
             text("SELECT emp_id FROM users WHERE emp_id = :emp_id"),
@@ -75,7 +75,7 @@ def create_job(db: Session, job: JobCreate):
         raise HTTPException(status_code=500, detail=f"Error creating job: {str(e)}")
 
 
-def get_job_by_id(db: Session, job_id: int):
+def get_job_by_id(db: Session, job_id: int) -> Dict[str, Any]:
     query = text("""
         SELECT 
             job_id, created_by, title, job_code, department, location,
@@ -100,11 +100,9 @@ def _get_manager_id_by_name(db: Session, manager_name: str) -> int:
     Search `users` table for a Manager by full_name or username.
     Returns emp_id if found, else raises 404.
     """
-    # Try exact match on full_name first
     sql = text("""
         SELECT emp_id FROM users 
-        WHERE role = 'Manager' 
-          AND (full_name = :name OR username = :name)
+        WHERE (full_name = :name OR username = :name)
           AND status = 'active'
     """)
     result = db.execute(sql, {"name": manager_name.strip()}).fetchone()
@@ -113,24 +111,25 @@ def _get_manager_id_by_name(db: Session, manager_name: str) -> int:
             status_code=404,
             detail=f"Manager with name '{manager_name}' not found or not active."
         )
-    # result may be RowProxy-like; return the emp_id column
     try:
         return result.emp_id
     except Exception:
-        # fallback in case result is tuple/dict
+        # fallback when result is tuple-like
         return list(result)[0]
+
 
 def create_job_request(db: Session, payload: JobRequestCreate) -> JobRequestResponse:
     """
-    Create Job_Request using manager_name → lookup → manager_id
-    Uses OUTPUT INSERTED.JD_ID for SQL Server so driver returns the new id.
+    Create Job_Request using manager_name → lookup → manager_id.
+    Uses OUTPUT INSERTED.JD_ID (SQL Server) or may be adapted to RETURNING for Postgres.
     """
-    # 1. Resolve manager_name → manager_id
+    # Resolve manager_name → manager_id
     try:
         manager_id = _get_manager_id_by_name(db, payload.manager_name)
     except HTTPException:
         raise  # re-raise 404
 
+    # NOTE: This uses SQL Server OUTPUT. If you're using Postgres, replace with RETURNING JD_ID.
     insert_sql = text("""
         INSERT INTO Job_Request (
             manager_id, JobTitle, JobDescription,
@@ -160,23 +159,20 @@ def create_job_request(db: Session, payload: JobRequestCreate) -> JobRequestResp
     }
 
     try:
-        # execute the insert which returns the inserted JD_ID via OUTPUT
+        # execute the insert which returns the inserted JD_ID via OUTPUT (SQL Server)
         result = db.execute(insert_sql, params)
-        # scalar() returns first column of first row (the JD_ID)
-        new_id_val = result.scalar()
+        new_id_val = result.scalar()  # first column of first row
         db.commit()
         if new_id_val is None:
             raise HTTPException(status_code=500, detail="Failed to obtain inserted JD_ID.")
         new_id = int(new_id_val)
         return get_job_request_by_id(db, new_id)
     except HTTPException:
-        # re-raise explicit HTTPException
         db.rollback()
         raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-
 
 
 def get_job_request_by_id(db: Session, jd_id: int) -> JobRequestResponse:
@@ -197,11 +193,47 @@ def get_job_request_by_id(db: Session, jd_id: int) -> JobRequestResponse:
     return JobRequestResponse(**row_dict)
 
 
-def list_job_requests(db: Session, approved: Optional[bool] = None):
+def list_job_requests(db: Session, approved: Optional[bool] = None) -> List[Dict[str, Any]]:
     sql = "SELECT * FROM Job_Request"
     params = {}
     if approved is not None:
         sql += " WHERE management_approval = :approved"
+        params["approved"] = 1 if approved else 0
+    sql += " ORDER BY JD_ID DESC"
+
+    rows = db.execute(text(sql), params).mappings().fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["management_approval"] = bool(d["management_approval"])
+        result.append(d)
+    return result
+
+
+def list_job_requests_by_username(db: Session, username_or_fullname: str, approved: Optional[bool] = None) -> List[Dict[str, Any]]:
+    """
+    Resolve users.emp_id by username or full_name, then return only Job_Request rows for that manager_id.
+    Returns empty list if no matching active user is found.
+    """
+    sql_user = text("""
+        SELECT emp_id FROM users
+        WHERE (username = :name OR full_name = :name)
+          AND status = 'active'
+    """)
+    user_row = db.execute(sql_user, {"name": username_or_fullname.strip()}).fetchone()
+    if not user_row:
+        # Return empty list if user not found; frontend can show "no records"
+        return []
+
+    try:
+        emp_id = user_row.emp_id
+    except Exception:
+        emp_id = list(user_row)[0]
+
+    sql = "SELECT * FROM Job_Request WHERE manager_id = :mid"
+    params = {"mid": emp_id}
+    if approved is not None:
+        sql += " AND management_approval = :approved"
         params["approved"] = 1 if approved else 0
     sql += " ORDER BY JD_ID DESC"
 
@@ -231,7 +263,7 @@ def update_job_request_approval(db: Session, jd_id: int, approve: bool) -> JobRe
     return get_job_request_by_id(db, jd_id)
 
 
-def delete_job_request(db: Session, jd_id: int) -> dict:
+def delete_job_request(db: Session, jd_id: int) -> Dict[str, Any]:
     sql = text("DELETE FROM Job_Request WHERE JD_ID = :jd_id")
     res = db.execute(sql, {"jd_id": jd_id})
     if res.rowcount == 0:
@@ -245,7 +277,6 @@ def update_job_request(db: Session, jd_id: int, payload: JobRequestUpdate) -> Jo
     """
     Partial update fields provided in payload. If manager_name provided, resolve to manager_id.
     """
-    # Ensure JD exists
     existing = db.execute(text("SELECT JD_ID FROM Job_Request WHERE JD_ID = :jd_id"), {"jd_id": jd_id}).fetchone()
     if not existing:
         raise HTTPException(status_code=404, detail="Job request not found")

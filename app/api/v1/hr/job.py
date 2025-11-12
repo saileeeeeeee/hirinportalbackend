@@ -1,5 +1,4 @@
 # app/api/v1/hr/job.py
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
@@ -10,26 +9,23 @@ from app.api.v1.hr.schemas import (
     JobResponse,
     JobRequestCreate,
     JobRequestResponse,
-    JobRequestUpdate
+    JobRequestUpdate,
 )
 from app.services.job_service import (
-    # --- Jobs Table Functions ---
+    # Jobs
     create_job,
     get_active_jobs,
     get_job_by_id,
-
-    # --- Job_Request Table Functions ---
+    # Job requests
     create_job_request,
     get_job_request_by_id,
     list_job_requests,
+    list_job_requests_by_username,
     update_job_request_approval,
     delete_job_request,
     update_job_request,
 )
-# ----------------------------------------------------------------------
-# Router imported in main.py as `hr_job_router`
-# Prefix "/api/v1/hr/jobs" is added in main.py
-# ----------------------------------------------------------------------
+
 router = APIRouter(tags=["HR Jobs & Job Requests"])
 
 
@@ -40,15 +36,33 @@ router = APIRouter(tags=["HR Jobs & Job Requests"])
 @router.post("/request", response_model=JobRequestResponse, status_code=201)
 def add_job_request(payload: JobRequestCreate, db: Session = Depends(get_db)):
     """
-    Create a new **Job Request** (goes into `Job_Request` table).
+    Create a new Job Request (in Job_Request table).
     """
-    return create_job_request(db, payload)
+    try:
+        return create_job_request(db, payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.get("/request/{jd_id}", response_model=JobRequestResponse)
-def read_job_request(jd_id: int, db: Session = Depends(get_db)):
-    """Fetch a single job request by JD_ID."""
-    return get_job_request_by_id(db, jd_id)
+@router.get("/request/by-username", response_model=List[JobRequestResponse])
+def list_requests_by_username(
+    username: str = Query(..., description="username or full_name of the manager"),
+    approved: Optional[bool] = Query(None, description="optional filter by approval"),
+    db: Session = Depends(get_db),
+):
+    """
+    Return job requests submitted by a particular manager (lookup by username or full_name).
+    Example: GET /api/v1/hr/jobs/request/by-username?username=sailesh.s
+    """
+    try:
+        rows = list_job_requests_by_username(db, username, approved)
+        return rows
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/request", response_model=List[JobRequestResponse])
@@ -57,10 +71,25 @@ def list_all_job_requests(
     db: Session = Depends(get_db),
 ):
     """
-    Return all job requests.
-    Use `?approved=true` or `?approved=false` to filter.
+    Return all job requests. Use `?approved=true` or `?approved=false` to filter.
     """
-    return list_job_requests(db, approved)
+    try:
+        return list_job_requests(db, approved)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/request/{jd_id}", response_model=JobRequestResponse)
+def read_job_request(jd_id: int, db: Session = Depends(get_db)):
+    """Fetch a single job request by JD_ID."""
+    try:
+        return get_job_request_by_id(db, jd_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.patch("/request/{jd_id}/approve", response_model=JobRequestResponse)
@@ -106,13 +135,13 @@ def edit_job_request(jd_id: int, payload: JobRequestUpdate, db: Session = Depend
 @router.post("/", status_code=201, response_model=Dict[str, Any])
 def add_job(job: JobCreate, db: Session = Depends(get_db)):
     """
-    Create a new **Job Posting** (goes into `jobs` table).
+    Create a new Job Posting (in jobs table).
     """
     try:
         result = create_job(db, job)
         return {"message": "Job created successfully", "data": result}
-    except HTTPException as exc:
-        raise exc
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to create job: {str(exc)}") from exc
 
@@ -123,6 +152,8 @@ def list_active_jobs(db: Session = Depends(get_db)):
     try:
         jobs = get_active_jobs(db)
         return {"active_jobs": jobs}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -136,10 +167,7 @@ def read_job(job_id: int, db: Session = Depends(get_db)):
     try:
         job = get_job_by_id(db, job_id)
         return job
-    except HTTPException as exc:
-        raise exc
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Database error: {str(exc)}"
-        ) from exc
+        raise HTTPException(status_code=500, detail=f"Database error: {str(exc)}") from exc
